@@ -14,9 +14,25 @@ os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
 @st.cache_resource
 def load_rag_pipeline():
-    # Loads PDFs from the 'docs' folder in your GitHub repo
-    loader = PyPDFDirectoryLoader("./docs")
+    # 1. Find the exact path where your app.py lives on Streamlit's servers
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    docs_dir = os.path.join(current_dir, "docs")
+    
+    # Fallback: If 'docs' folder doesn't exist, look in the main folder
+    if not os.path.exists(docs_dir):
+        docs_dir = current_dir
+        
+    # 2. Load the PDFs
+    loader = PyPDFDirectoryLoader(docs_dir)
     documents = loader.load()
+    
+    # 3. Guardrail: Stop the app and show a clear error if no PDFs are found
+    if len(documents) == 0:
+        st.error("❌ ERROR: No PDF files were found in your GitHub repository!")
+        st.info("👉 Please ensure you created a folder named 'docs' and uploaded the 11 extracted .pdf files inside it (not the .zip file).")
+        st.stop()
+        
+    print(f"✅ Successfully loaded {len(documents)} documents.")
     
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = text_splitter.split_documents(documents)
@@ -44,6 +60,8 @@ Answer:"""
     )
 
 st.title("Zyro Dynamics HR Help Desk 🤖")
+
+# Load the chain
 chain = load_rag_pipeline()
 
 if "messages" not in st.session_state:
