@@ -1,21 +1,5 @@
 langchain
 langchain-community
-langchain-groq
-langchain-text-splitters
-langchain-huggingface
-langchain-chroma
-faiss-cpu
-pypdf
-sentence-transformers
-streamlit
-huggingface_hub
-langgraph
-chromadb
-protobuf==3.20.3
-rank_bm25
-flashrank
-langchain
-langchain-community
 langchain-text-splitters
 langchain-huggingface
 langchain-groq
@@ -25,5 +9,3 @@ pypdf
 sentence-transformers
 streamlit
 huggingface_hub
-rank_bm25
-flashrank
