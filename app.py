@@ -11,8 +11,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain.retrievers.multi_query import MultiQueryRetriever
-from langsmith import Client as LangSmithClient
-import langchain
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 os.environ["GROQ_API_KEY"]      = st.secrets["GROQ_API_KEY"]
