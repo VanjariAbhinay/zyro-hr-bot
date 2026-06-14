@@ -12,10 +12,16 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
-os.environ["GROQ_API_KEY"]      = st.secrets["GROQ_API_KEY"]
-os.environ["LANGCHAIN_API_KEY"] = st.secrets["LANGCHAIN_API_KEY"]
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_PROJECT"] = "zyro-rag-challenge"
+os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+
+# LangSmith tracing — optional (enable if key is present)
+_langchain_key = st.secrets.get("LANGCHAIN_API_KEY", "")
+if _langchain_key:
+    os.environ["LANGCHAIN_API_KEY"]      = _langchain_key
+    os.environ["LANGCHAIN_TRACING_V2"]   = "true"
+    os.environ["LANGCHAIN_PROJECT"]      = "zyro-rag-challenge"
+else:
+    os.environ["LANGCHAIN_TRACING_V2"]   = "false"
 
 # ── HR keyword fast-path (avoid unnecessary LLM calls for clear HR questions) ─
 HR_KEYWORDS = {
