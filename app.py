@@ -4,6 +4,7 @@ import streamlit as st
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+# pyrefly: ignore [missing-import]
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -81,9 +82,9 @@ def load_pipeline():
     )
     chunks = splitter.split_documents(documents)
 
-    # 3. Embed — BAAI/bge-large-en-v1.5 is state-of-the-art for retrieval
+    # 3. Embed — BAAI/bge-base-en-v1.5: state-of-the-art retrieval, fits Streamlit Cloud
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-large-en-v1.5",
+        model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True},  # required for BGE cosine sim
     )
