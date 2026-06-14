@@ -2,10 +2,13 @@ langchain
 langchain-community
 langchain-groq
 langchain-text-splitters
+langchain-huggingface
+langchain-chroma
 faiss-cpu
 pypdf
 sentence-transformers
 streamlit
 huggingface_hub
-langchain-chroma
+langgraph
 chromadb
+protobuf==3.20.3
