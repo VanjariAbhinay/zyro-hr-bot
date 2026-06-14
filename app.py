@@ -10,7 +10,6 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain.retrievers.multi_query import MultiQueryRetriever
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 os.environ["GROQ_API_KEY"]      = st.secrets["GROQ_API_KEY"]
@@ -101,11 +100,35 @@ def load_pipeline():
         max_tokens=1024,
     )
 
-    # 6. Multi-Query Retriever — generates query variants for better recall
-    multi_retriever = MultiQueryRetriever.from_llm(
-        retriever=base_retriever,
-        llm=llm,
+    # 6. Multi-query prompt — generates query variants for better recall
+    multi_query_prompt = ChatPromptTemplate.from_template(
+        """Generate 3 different phrasings of the following HR question to improve document retrieval.
+        Output ONLY the 3 questions, one per line, no numbering, no extra text.
+
+        Original question: {question}
+
+        3 rephrased questions:"""
     )
+
+    def multi_query_retrieve(question: str, retriever, llm):
+        """Generate query variants and retrieve docs for each, deduplicated."""
+        try:
+            variants_raw = (multi_query_prompt | llm | StrOutputParser()).invoke({"question": question})
+            variants = [q.strip() for q in variants_raw.strip().split("\n") if q.strip()][:3]
+        except Exception:
+            variants = []
+        all_queries = [question] + variants
+        seen_ids, docs = set(), []
+        for q in all_queries:
+            try:
+                for doc in retriever.invoke(q):
+                    doc_id = hash(doc.page_content[:100])
+                    if doc_id not in seen_ids:
+                        seen_ids.add(doc_id)
+                        docs.append(doc)
+            except Exception:
+                pass
+        return docs or retriever.invoke(question)
 
     # 7. Master RAG prompt — structured for precise policy extraction
     rag_prompt = ChatPromptTemplate.from_template("""You are the official HR Help Desk assistant for Zyro Dynamics Pvt. Ltd.
@@ -170,10 +193,7 @@ Answer:""")
                 }
 
         # Layer 3: Retrieve with multi-query retrieval for better coverage
-        try:
-            docs = multi_retriever.invoke(question)
-        except Exception:
-            docs = base_retriever.invoke(question)
+        docs = multi_query_retrieve(question, base_retriever, llm)
 
         if not docs:
             return {
