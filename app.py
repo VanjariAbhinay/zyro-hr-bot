@@ -11,10 +11,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_community.retrievers import BM25Retriever
-try:
-    from langchain.retrievers import EnsembleRetriever
-except (ImportError, ModuleNotFoundError):
-    from langchain_community.retrievers import EnsembleRetriever
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
@@ -135,10 +131,7 @@ def load_pipeline():
     bm25_retriever = BM25Retriever.from_documents(chunks, k=10)
 
     # 6. Hybrid ensemble retriever — best of both worlds
-    ensemble_retriever = EnsembleRetriever(
-        retrievers=[bm25_retriever, semantic_retriever],
-        weights=[0.3, 0.7],
-    )
+    # We will manually merge from both bm25_retriever and semantic_retriever
 
     # 7. LLM — Groq llama-3.3-70b-versatile
     llm = ChatGroq(
@@ -168,14 +161,15 @@ Original question: {question}
         seen_ids, docs = set(), []
         for q in all_queries:
             try:
-                for doc in ensemble_retriever.invoke(q):
+                retrieved_docs = bm25_retriever.invoke(q) + semantic_retriever.invoke(q)
+                for doc in retrieved_docs:
                     doc_id = hash(doc.page_content[:200])
                     if doc_id not in seen_ids:
                         seen_ids.add(doc_id)
                         docs.append(doc)
             except Exception:
                 pass
-        return docs or ensemble_retriever.invoke(question)
+        return docs or (bm25_retriever.invoke(question) + semantic_retriever.invoke(question))
 
     def get_full_document_context(question: str):
         """Parent-document retrieval: find relevant chunks, then inject
