@@ -10,6 +10,8 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
@@ -22,6 +24,12 @@ if _langchain_key:
     os.environ["LANGCHAIN_PROJECT"]      = "zyro-rag-challenge"
 else:
     os.environ["LANGCHAIN_TRACING_V2"]   = "false"
+
+# ── Standardized refusal message ──────────────────────────────────────────────
+REFUSAL_MSG = (
+    "I can only answer questions related to Zyro Dynamics HR policies. "
+    "This question is outside my scope. Please contact HR directly for non-policy queries."
+)
 
 # ── HR keyword fast-path (avoid unnecessary LLM calls for clear HR questions) ─
 HR_KEYWORDS = {
@@ -38,6 +46,12 @@ HR_KEYWORDS = {
     "termination", "disciplinary", "code", "ethics", "misconduct", "warning",
     "annual", "earned", "casual", "compensatory", "bereavement",
     "accommodation", "hotel", "flight", "per diem", "cab", "conveyance",
+    "work", "hours", "attendance", "payroll", "stipend", "internship",
+    "retirement", "okr", "objectives", "feedback", "calibration",
+    "encryption", "laptop", "password", "vpn", "firewall", "antivirus",
+    "marriage", "wedding", "encashment", "carry", "forward",
+    "probation", "confirmation", "induction", "relieving", "experience",
+    "letter", "exit", "interview", "handover", "knowledge",
 }
 
 OUT_OF_SCOPE_KEYWORDS = {
@@ -46,9 +60,13 @@ OUT_OF_SCOPE_KEYWORDS = {
     "celebrity", "music", "song", "game", "gaming", "restaurant", "food",
     "travel destination", "tourist", "covid vaccine", "hospital", "doctor",
     "astrology", "horoscope", "joke", "poem", "story", "history of india",
+    "medical diagnosis", "investment", "share market", "lottery", "betting",
+    "capital", "president", "prime minister", "planet", "solar system",
+    "programming", "python", "javascript", "machine learning", "ai model",
 }
 
-def is_hr_question(question: str) -> bool:
+
+def is_hr_question(question: str):
     """Fast keyword-based HR relevance check."""
     q_lower = question.lower()
     words = set(re.findall(r'\b\w+\b', q_lower))
@@ -76,47 +94,67 @@ def load_pipeline():
         st.error("❌ No PDFs found in /docs folder!")
         st.stop()
 
-    # 2. Chunk — smaller chunks = more precise retrieval
+    # ── Pre-extract FULL TEXT per source document ─────────────────────────────
+    # This is the key to parent-document retrieval: when retrieval finds
+    # relevant chunks, we inject the FULL document text as context so
+    # no table rows, numbers, or details are ever lost to chunking.
+    doc_full_texts = {}
+    for doc in documents:
+        source = doc.metadata.get("source", "")
+        if source not in doc_full_texts:
+            doc_full_texts[source] = ""
+        doc_full_texts[source] += doc.page_content + "\n\n"
+
+    # 2. Chunk — SMALLER chunks for finer-grained retrieval
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=700,
-        chunk_overlap=200,
+        chunk_size=500,
+        chunk_overlap=150,
         separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""],
         add_start_index=True,
     )
     chunks = splitter.split_documents(documents)
 
-    # 3. Embed — BAAI/bge-base-en-v1.5: state-of-the-art retrieval, fits Streamlit Cloud
+    # 3. Embed — BAAI/bge-base-en-v1.5
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},  # required for BGE cosine sim
+        encode_kwargs={"normalize_embeddings": True},
     )
 
-    # 4. FAISS vector store with MMR for diversity
+    # 4. FAISS semantic retriever (MMR for diversity)
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    base_retriever = vectorstore.as_retriever(
+    semantic_retriever = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 6, "fetch_k": 20, "lambda_mult": 0.6},
+        search_kwargs={"k": 10, "fetch_k": 40, "lambda_mult": 0.5},
     )
 
-    # 5. LLM — Groq llama-3.3-70b-versatile (best free model)
+    # 5. BM25 keyword retriever (catches exact term matches embeddings miss)
+    bm25_retriever = BM25Retriever.from_documents(chunks, k=10)
+
+    # 6. Hybrid ensemble retriever — best of both worlds
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[bm25_retriever, semantic_retriever],
+        weights=[0.3, 0.7],
+    )
+
+    # 7. LLM — Groq llama-3.3-70b-versatile
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         temperature=0,
-        max_tokens=1024,
+        max_tokens=2048,
     )
 
-    # 6. Multi-query prompt — generates query variants for better recall
+    # 8. Multi-query prompt — generates query variants for better recall
     multi_query_prompt = ChatPromptTemplate.from_template(
         """Generate 3 different phrasings of the following HR question to improve document retrieval.
-        Output ONLY the 3 questions, one per line, no numbering, no extra text.
+Output ONLY the 3 questions, one per line, no numbering, no extra text.
 
-        Original question: {question}
+Original question: {question}
 
-        3 rephrased questions:"""
+3 rephrased questions:"""
     )
 
-    def multi_query_retrieve(question: str, retriever, llm):
+    def multi_query_retrieve(question: str):
         """Generate query variants and retrieve docs for each, deduplicated."""
         try:
             variants_raw = (multi_query_prompt | llm | StrOutputParser()).invoke({"question": question})
@@ -127,51 +165,78 @@ def load_pipeline():
         seen_ids, docs = set(), []
         for q in all_queries:
             try:
-                for doc in retriever.invoke(q):
-                    doc_id = hash(doc.page_content[:100])
+                for doc in ensemble_retriever.invoke(q):
+                    doc_id = hash(doc.page_content[:200])
                     if doc_id not in seen_ids:
                         seen_ids.add(doc_id)
                         docs.append(doc)
             except Exception:
                 pass
-        return docs or retriever.invoke(question)
+        return docs or ensemble_retriever.invoke(question)
 
-    # 7. Master RAG prompt — structured for precise policy extraction
-    rag_prompt = ChatPromptTemplate.from_template("""You are the official HR Help Desk assistant for Zyro Dynamics Pvt. Ltd.
-Your job is to answer employee HR questions STRICTLY using the provided policy documents.
+    def get_full_document_context(question: str):
+        """Parent-document retrieval: find relevant chunks, then inject
+        FULL text of the top matching source documents as context.
+        This ensures tables, lists, and multi-part policies are never fragmented."""
+        initial_docs = multi_query_retrieve(question)
 
-CRITICAL RULES:
-1. Use ONLY information from the Context below — never invent, assume, or add external knowledge.
-2. Be SPECIFIC: include exact numbers, durations, percentages, eligibility criteria, and procedures.
-3. If the context contains the answer, give it clearly and completely.
-4. If the context does NOT contain sufficient information, say: "This specific information is not covered in the available HR policy documents. Please contact HR directly."
-5. Do NOT hedge unnecessarily if the answer is clearly present in context.
-6. Write in clear, professional English. Use bullet points for multi-part answers.
+        if not initial_docs:
+            return "", []
+
+        # Count which source documents appear most in retrieval results
+        source_counts = {}
+        for doc in initial_docs:
+            src = doc.metadata.get("source", "")
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+        # Get top 3 most-relevant source documents
+        top_sources = sorted(source_counts, key=source_counts.get, reverse=True)[:3]
+
+        # Build context from FULL document texts (no fragmentation!)
+        context_parts = []
+        for src in top_sources:
+            if src in doc_full_texts:
+                context_parts.append(doc_full_texts[src])
+
+        return "\n\n---\n\n".join(context_parts), top_sources
+
+    # 9. Master RAG prompt — PRECISION focused for maximum semantic similarity
+    rag_prompt = ChatPromptTemplate.from_template("""You are the HR Help Desk assistant for Zyro Dynamics Pvt. Ltd.
+Answer the employee's question using ONLY the policy documents provided below.
+
+INSTRUCTIONS:
+1. Use ONLY information from the Context. Never add external knowledge.
+2. Be PRECISE: state exact numbers, days, percentages, amounts, dates, and eligibility criteria directly from the policy.
+3. Be COMPLETE: include ALL relevant details, conditions, exceptions, and related rules.
+4. Be DIRECT: start with the answer immediately. Do NOT add filler phrases like "According to the policy" or "As per the HR documents" or "Based on the provided context".
+5. For questions about entitlements or limits, state the specific values clearly (e.g., "8 days of Casual Leave per year").
+6. For questions about processes, list the steps in order.
+7. For tabular data (travel entitlements, leave types, rating scales), present the key data points clearly.
+8. Use bullet points for multi-part answers.
+9. If the context does NOT contain the answer, respond ONLY with: "This information is not available in the HR policy documents. Please contact HR directly."
 
 Context (from Zyro Dynamics HR Policy Documents):
 {context}
 
 Employee Question: {question}
 
-HR Assistant Answer:""")
+Answer:""")
 
-    # 8. Scope-check prompt
-    scope_prompt = ChatPromptTemplate.from_template("""You are a classifier. Determine if the following question is related to company HR policies, employment, leave, benefits, compensation, workplace conduct, IT security, onboarding, travel expenses, or performance management at a company.
+    # 10. Scope-check prompt
+    scope_prompt = ChatPromptTemplate.from_template("""You are a classifier. Determine if the following question is related to:
+- Company HR policies, employment, workplace rules
+- Leave, attendance, holidays
+- Benefits, compensation, salary, insurance
+- Workplace conduct, ethics, harassment
+- IT security, data protection, devices
+- Onboarding, separation, probation, retirement
+- Travel expenses, reimbursements
+- Performance management, reviews, promotions
 
 Answer ONLY with one word: YES or NO.
 
 Question: {question}
 Answer:""")
-
-    def format_docs(docs):
-        seen = set()
-        result = []
-        for doc in docs:
-            content = doc.page_content.strip()
-            if content not in seen:
-                seen.add(content)
-                result.append(content)
-        return "\n\n---\n\n".join(result)
 
     def ask_bot(question: str):
         question = question.strip()
@@ -182,34 +247,30 @@ Answer:""")
         keyword_result = is_hr_question(question)
 
         if keyword_result is False:
-            return {
-                "answer": "I'm sorry, I can only answer HR-related questions based on Zyro Dynamics policy documents. This question appears to be outside my scope. Please contact HR directly for non-policy queries.",
-                "sources": []
-            }
+            return {"answer": REFUSAL_MSG, "sources": []}
 
         # Layer 2: LLM classification for ambiguous questions
         if keyword_result is None:
-            classification = (scope_prompt | llm | StrOutputParser()).invoke(
-                {"question": question}
-            ).strip().upper()
-            if "NO" in classification and "YES" not in classification:
-                return {
-                    "answer": "I'm sorry, I can only answer HR-related questions based on Zyro Dynamics policy documents. This question appears to be outside my scope. Please contact HR directly for non-policy queries.",
-                    "sources": []
-                }
+            try:
+                classification = (scope_prompt | llm | StrOutputParser()).invoke(
+                    {"question": question}
+                ).strip().upper()
+                if "NO" in classification and "YES" not in classification:
+                    return {"answer": REFUSAL_MSG, "sources": []}
+            except Exception:
+                # If classification fails, default to trying to answer
+                pass
 
-        # Layer 3: Retrieve with multi-query retrieval for better coverage
-        docs = multi_query_retrieve(question, base_retriever, llm)
+        # Layer 3: Parent-document context retrieval
+        context, sources = get_full_document_context(question)
 
-        if not docs:
+        if not context.strip():
             return {
-                "answer": "I'm sorry, I couldn't find relevant information in the HR policy documents. Please contact HR directly.",
+                "answer": "This information is not available in the HR policy documents. Please contact HR directly.",
                 "sources": []
             }
 
-        context = format_docs(docs)
-
-        # Layer 4: Check context relevance before generating answer
+        # Layer 4: Generate precise answer with full document context
         chain = (
             {"context": RunnableLambda(lambda _: context), "question": RunnablePassthrough()}
             | rag_prompt
@@ -217,11 +278,6 @@ Answer:""")
             | StrOutputParser()
         )
         answer = chain.invoke(question)
-
-        # Collect unique source document names
-        sources = sorted(set(
-            doc.metadata.get("source", "Unknown") for doc in docs
-        ))
 
         return {"answer": answer, "sources": sources}
 
@@ -399,7 +455,8 @@ with st.sidebar:
     st.divider()
     st.markdown(
         "<small style='color:#64748b'>⚡ Powered by Groq LLaMA-3.3-70B<br>"
-        "🔍 BGE-Large Embeddings + MMR<br>"
+        "🔍 Hybrid BM25 + BGE Embeddings<br>"
+        "📄 Parent-Document Retrieval<br>"
         "🔗 LangSmith Tracing Active</small>",
         unsafe_allow_html=True
     )
@@ -408,7 +465,7 @@ with st.sidebar:
 st.markdown("""
 <div class="zyro-header">
     <h1>🤖 Zyro Dynamics HR Help Desk</h1>
-    <p>Ask any HR policy question — powered by RAG with semantic search across 11 policy documents</p>
+    <p>Ask any HR policy question — powered by RAG with hybrid search across 11 policy documents</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -417,9 +474,9 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown('<div class="stat-card"><div class="stat-number">11</div><div class="stat-label">Policy Docs</div></div>', unsafe_allow_html=True)
 with c2:
-    st.markdown('<div class="stat-card"><div class="stat-number">BGE-L</div><div class="stat-label">Embedding Model</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="stat-card"><div class="stat-number">Hybrid</div><div class="stat-label">BM25 + Semantic</div></div>', unsafe_allow_html=True)
 with c3:
-    st.markdown('<div class="stat-card"><div class="stat-number">MMR</div><div class="stat-label">Retrieval Strategy</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="stat-card"><div class="stat-number">Parent</div><div class="stat-label">Doc Retrieval</div></div>', unsafe_allow_html=True)
 with c4:
     st.markdown('<div class="stat-card"><div class="stat-number">70B</div><div class="stat-label">LLaMA Model</div></div>', unsafe_allow_html=True)
 
