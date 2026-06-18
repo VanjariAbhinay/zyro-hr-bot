@@ -11,7 +11,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
+try:
+    from langchain.retrievers import EnsembleRetriever
+except (ImportError, ModuleNotFoundError):
+    from langchain_community.retrievers import EnsembleRetriever
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
